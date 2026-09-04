@@ -49,28 +49,17 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(32, 40, 32, 32); gravity = Gravity.CENTER_HORIZONTAL }
         statusView = TextView(this).apply { text = "READY TO LISTEN"; textSize = 28f; gravity = Gravity.CENTER; contentDescription = "Assistant status" }
         transcriptView = TextView(this).apply { text = "Say: Call Gyamera\nOr: Frɛ me ba"; textSize = 24f; setPadding(0, 28, 0, 28) }
-        val listen = Button(this).apply {
-            text = "LISTEN"; textSize = 30f; minHeight = 150; contentDescription = "Start voice listening"; setOnClickListener { listenNow() }
-        }
-        val repeat = Button(this).apply {
-            text = "REPEAT"; textSize = 24f; minHeight = 100
-            setOnClickListener { speak("Say call followed by the person's name, or say Frɛ me ba to call your saved child.") }
-        }
+        val listen = Button(this).apply { text = "LISTEN"; textSize = 30f; minHeight = 150; contentDescription = "Start voice listening"; setOnClickListener { listenNow() } }
+        val repeat = Button(this).apply { text = "REPEAT"; textSize = 24f; minHeight = 100; setOnClickListener { speak("Say call followed by the person's name, or say Frɛ me ba to call your saved child.") } }
         val scroll = ScrollView(this).apply { addView(transcriptView) }
-        root.addView(statusView, LinearLayout.LayoutParams(-1, 100)); root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f))
-        root.addView(listen, LinearLayout.LayoutParams(-1, 160)); root.addView(repeat, LinearLayout.LayoutParams(-1, 110))
+        root.addView(statusView, LinearLayout.LayoutParams(-1, 100)); root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f)); root.addView(listen, LinearLayout.LayoutParams(-1, 160)); root.addView(repeat, LinearLayout.LayoutParams(-1, 110))
         setContentView(root)
     }
 
     // Volume up is a screen-free listen trigger; volume down is an immediate cancel.
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean = when (keyCode) {
         KeyEvent.KEYCODE_VOLUME_UP -> { listenNow(); true }
-        KeyEvent.KEYCODE_VOLUME_DOWN -> {
-            if (::speechRecognizer.isInitialized) speechRecognizer.cancel()
-            waitingForConfirmation = null
-            speak("Stopped listening.")
-            true
-        }
+        KeyEvent.KEYCODE_VOLUME_DOWN -> { if (::speechRecognizer.isInitialized) speechRecognizer.cancel(); waitingForConfirmation = null; speak("Stopped listening."); true }
         else -> super.onKeyDown(keyCode, event)
     }
 
@@ -79,9 +68,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED &&
         ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
 
-    private fun requestRequiredPermissions() {
-        ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.READ_CONTACTS, Manifest.permission.CALL_PHONE), requestCode)
-    }
+    private fun requestRequiredPermissions() = ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.READ_CONTACTS, Manifest.permission.CALL_PHONE), requestCode)
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
@@ -94,10 +81,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun listenNow() {
-        if (waitingForConfirmation != null) {
-            speak("Please say yes to call ${waitingForConfirmation!!.name}, or say no to cancel.")
-            return
-        }
+        if (waitingForConfirmation != null) { speak("Please say yes to call ${waitingForConfirmation!!.name}, or say no to cancel."); return }
         if (!::speechRecognizer.isInitialized) { speak("Voice recognition is not available on this phone."); return }
         if (!hasPermissions()) { requestRequiredPermissions(); return }
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
@@ -148,14 +132,13 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             else speak("I could not find that person in your contacts.")
             return
         }
-        when (val command = parser.parse(spoken)) {
-            is VoiceCommand -> when (command.type) {
-                CommandType.STOP -> { if (::speechRecognizer.isInitialized) speechRecognizer.cancel(); waitingForConfirmation = null; speak("Stopped. I am ready when you need me.") }
-                CommandType.HELP -> speak("You can say call a person's name, say Frɛ me ba for a saved relationship, or say stop.")
-                CommandType.LIST_CONTACTS -> { val names = contacts.allNames(); speak(if (names.isEmpty()) "There are no phone contacts available." else "Your contacts include ${names.joinToString(", ")}.") }
-                CommandType.CALL -> resolveAndCall(command.target.orEmpty())
-                CommandType.UNKNOWN -> speak("I can make calls. Try saying call Gyamera, or Frɛ me ba.")
-            }
+        val command = parser.parse(spoken)
+        when (command.type) {
+            CommandType.STOP -> { if (::speechRecognizer.isInitialized) speechRecognizer.cancel(); waitingForConfirmation = null; speak("Stopped. I am ready when you need me.") }
+            CommandType.HELP -> speak("You can say call a person's name, say Frɛ me ba for a saved relationship, or say stop.")
+            CommandType.LIST_CONTACTS -> { val names = contacts.allNames(); speak(if (names.isEmpty()) "There are no phone contacts available." else "Your contacts include ${names.joinToString(", ")}.") }
+            CommandType.CALL -> resolveAndCall(command.target.orEmpty())
+            CommandType.UNKNOWN -> speak("I can make calls. Try saying call Gyamera, or Frɛ me ba.")
         }
     }
 
