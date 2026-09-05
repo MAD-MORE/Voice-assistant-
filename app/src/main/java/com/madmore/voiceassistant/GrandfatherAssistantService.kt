@@ -64,23 +64,51 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
             override fun onDone(id: String?) { handler.post { if (!destroyed) finishSpeaking() } }
             override fun onError(id: String?) { handler.post { if (!destroyed) finishSpeaking() } }
         })
-        OfflineSpeech.create(this)?.also {
-            recognizer = it
-            recognizer.setRecognitionListener(listener)
+
+        // Never make Android 12+ on-device support a hard requirement. OfflineSpeech
+        // prefers on-device recognition but falls back to the platform recognizer on
+        // older/unsupported phones, where EXTRA_PREFER_OFFLINE is still requested.
+        try {
+            OfflineSpeech.create(this)?.also {
+                recognizer = it
+                recognizer.setRecognitionListener(listener)
+            }
+        } catch (_: Exception) {
+            // Recognition is reported through the normal unavailable path below.
         }
     }
 
     private fun promoteToForeground() {
         val n = buildNotification()
-        if (Build.VERSION.SDK_INT >= 29) ServiceCompat.startForeground(this, NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
-        else startForeground(NOTIFICATION_ID, n)
+        if (Build.VERSION.SDK_INT >= 29) {
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+        } else {
+            startForeground(NOTIFICATION_ID, n)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_STOP -> { mode = Mode.IDLE; waitingForConfirmation = null; stopSelf(); return START_NOT_STICKY }
-            ACTION_LISTEN_NOW -> if (::recognizer.isInitialized && hasMicPermission()) speak("What should I do for you?", Mode.COMMAND)
-            else -> if (::recognizer.isInitialized && hasMicPermission()) { mode = Mode.WAKE; scheduleListening(500) }
+            ACTION_STOP -> {
+                mode = Mode.IDLE
+                waitingForConfirmation = null
+                handler.removeCallbacksAndMessages(LISTEN_TOKEN)
+                try { if (::recognizer.isInitialized) recognizer.cancel() } catch (_: Exception) { }
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            ACTION_LISTEN_NOW -> {
+                if (!hasMicPermission()) return START_STICKY
+                mode = Mode.COMMAND
+                if (ttsReady) speak("What should I do for you?", Mode.COMMAND)
+                else scheduleListening(150)
+            }
+            else -> {
+                if (hasMicPermission()) {
+                    mode = Mode.WAKE
+                    if (ttsReady) scheduleListening(250)
+                }
+            }
         }
         return START_STICKY
     }
@@ -88,7 +116,7 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
     private fun buildNotification(): Notification = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.ic_btn_speak_now)
         .setContentTitle("Hello is ready")
-        .setContentText(if (OfflineSpeech.isTrueOnDeviceAvailable(this)) "Offline voice is ready" else "Offline voice is unavailable on this phone")
+        .setContentText(if (OfflineSpeech.isTrueOnDeviceAvailable(this)) "Offline voice is ready" else "Voice recognition is ready")
         .setOngoing(true)
         .setCategory(NotificationCompat.CATEGORY_SERVICE)
         .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -107,7 +135,9 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
     private fun scheduleListening(delayMs: Long) {
         handler.removeCallbacksAndMessages(LISTEN_TOKEN)
         handler.postAtTime({
-            if (!destroyed && mode != Mode.SPEAKING && ::recognizer.isInitialized && hasMicPermission()) startRecognition()
+            if (!destroyed && mode != Mode.SPEAKING && ::recognizer.isInitialized && hasMicPermission()) {
+                startRecognition()
+            }
         }, LISTEN_TOKEN, android.os.SystemClock.uptimeMillis() + delayMs)
     }
 
@@ -126,12 +156,18 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1200)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 700)
         }
-        try { recognizer.startListening(intent) }
-        catch (_: Exception) { recognitionFailures++; scheduleListening(minOf(6000L, 700L * recognitionFailures)) }
+        try {
+            recognizer.startListening(intent)
+        } catch (_: Exception) {
+            recognitionFailures++
+            scheduleListening(minOf(6000L, 700L * recognitionFailures))
+        }
     }
 
     private val listener = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) = Unit
+        override fun onReadyForSpeech(params: Bundle?) {
+            recognitionFailures = 0
+        }
         override fun onBeginningOfSpeech() = Unit
         override fun onRmsChanged(rmsdB: Float) = Unit
         override fun onBufferReceived(buffer: ByteArray?) = Unit
@@ -144,8 +180,9 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
             recognitionFailures++
             val delay = when (error) {
                 SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> 2200L
-                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> 850L
-                SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> 5000L
+                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> 650L
+                SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> 3500L
+                SpeechRecognizer.ERROR_CLIENT -> 1200L
                 else -> minOf(6000L, 700L * recognitionFailures)
             }
             scheduleListening(delay)
@@ -163,7 +200,7 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
         val match = wakeDetector.detect(phrases)
         if (!match.matched) {
             mode = Mode.WAKE
-            scheduleListening(850)
+            scheduleListening(650)
             return
         }
         val remainder = wakeDetector.removeWakeWord(match.text)
@@ -205,7 +242,10 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun handleCommand(spoken: String) {
-        if (spoken.isBlank()) { speak("I did not hear you. Please say it again.", Mode.COMMAND); return }
+        if (spoken.isBlank()) {
+            speak("I did not hear you. Please say it again.", Mode.COMMAND)
+            return
+        }
         val command = parser.parse(spoken)
         val normalized = parser.normalize(spoken)
         if (normalized.startsWith("remember ") && normalized.contains(" as ")) {
@@ -213,14 +253,24 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
             val person = body.substringBefore(" as ").trim()
             val relationship = body.substringAfter(" as ").trim()
             val c = contacts.findCandidates(person, 1).firstOrNull()
-            if (c != null && c.score >= 0.45) { aliases.saveAlias(relationship, c.name); speak("Okay. I will remember ${c.name} as $relationship.", Mode.WAKE) }
-            else speak("I could not find that person in your contacts.", Mode.WAKE)
+            if (c != null && c.score >= 0.45) {
+                aliases.saveAlias(relationship, c.name)
+                speak("Okay. I will remember ${c.name} as $relationship.", Mode.WAKE)
+            } else {
+                speak("I could not find that person in your contacts.", Mode.WAKE)
+            }
             return
         }
         when (command.type) {
-            CommandType.STOP -> { waitingForConfirmation = null; speak("Okay. I am here when you need me.", Mode.WAKE) }
+            CommandType.STOP -> {
+                waitingForConfirmation = null
+                speak("Okay. I am here when you need me.", Mode.WAKE)
+            }
             CommandType.HELP -> speak("Say hello, then say call a person's name. You can also say stop or remember a name as your son.", Mode.WAKE)
-            CommandType.LIST_CONTACTS -> { val names = contacts.allNames(); speak(if (names.isEmpty()) "There are no phone contacts available." else "Your contacts include ${names.joinToString(", ")}.", Mode.WAKE) }
+            CommandType.LIST_CONTACTS -> {
+                val names = contacts.allNames()
+                speak(if (names.isEmpty()) "There are no phone contacts available." else "Your contacts include ${names.joinToString(", ")}.", Mode.WAKE)
+            }
             CommandType.CALL -> resolveAndCall(command.target.orEmpty())
             CommandType.UNKNOWN -> speak("I can make calls. Please say call, followed by the person's name.", Mode.COMMAND)
         }
@@ -229,8 +279,12 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
     private fun resolveAndCall(target: String) {
         val query = aliases.resolveAlias(target) ?: target
         val candidates = contacts.findCandidates(query, 5)
-        if (candidates.isEmpty()) { speak("I cannot find $target in your contacts. Please say the name again.", Mode.COMMAND); return }
-        val top = candidates.first(); val second = candidates.getOrNull(1)
+        if (candidates.isEmpty()) {
+            speak("I cannot find $target in your contacts. Please say the name again.", Mode.COMMAND)
+            return
+        }
+        val top = candidates.first()
+        val second = candidates.getOrNull(1)
         val confident = top.score >= 0.86 && (second == null || top.score - second.score >= 0.10)
         if (confident) {
             waitingForConfirmation = null
@@ -244,36 +298,69 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun callContact(candidate: ContactCandidate?) {
-        if (candidate == null) { mode = Mode.WAKE; scheduleListening(500); return }
+        if (candidate == null) {
+            mode = Mode.WAKE
+            scheduleListening(500)
+            return
+        }
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
-            speak("Phone permission is not available. Please open Hello and allow phone calls.", Mode.WAKE); return
+            speak("Phone permission is not available. Please open Hello and allow phone calls.", Mode.WAKE)
+            return
         }
         try {
-            startActivity(Intent(Intent.ACTION_CALL, Uri.parse("tel:${candidate.phone.replace("#", "%23")}")).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
+            startActivity(Intent(Intent.ACTION_CALL, Uri.parse("tel:${candidate.phone.replace("#", "%23")}")).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            })
             mode = Mode.WAKE
-        } catch (_: Exception) { speak("I could not start the call. Please try again.", Mode.WAKE) }
+        } catch (_: Exception) {
+            speak("I could not start the call. Please try again.", Mode.WAKE)
+        }
     }
 
     private fun speak(message: String, resumeMode: Mode, listenAfter: Boolean = true) {
-        if (!ttsReady || destroyed) return
+        if (destroyed) return
+        if (!ttsReady) {
+            // TTS initialization is asynchronous. Do not lose the interaction;
+            // keep listening so the first command can still be captured.
+            mode = resumeMode
+            if (listenAfter) scheduleListening(250)
+            return
+        }
         try { if (::recognizer.isInitialized) recognizer.cancel() } catch (_: Exception) { }
         handler.removeCallbacksAndMessages(LISTEN_TOKEN)
         speechResumeMode = resumeMode
         speechShouldListen = listenAfter
         mode = Mode.SPEAKING
-        tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "hello-${System.currentTimeMillis()}")
+        val result = tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "hello-${System.currentTimeMillis()}")
+        if (result == TextToSpeech.ERROR) {
+            mode = resumeMode
+            if (listenAfter) scheduleListening(300)
+        }
     }
 
-    private fun finishSpeaking() { mode = speechResumeMode; if (speechShouldListen) scheduleListening(700) }
-    private fun hasMicPermission() = ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+    private fun finishSpeaking() {
+        mode = speechResumeMode
+        if (speechShouldListen) scheduleListening(700)
+    }
+
+    private fun hasMicPermission() =
+        ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
     override fun onInit(status: Int) {
         ttsReady = status == TextToSpeech.SUCCESS
         if (ttsReady) {
             val gh = java.util.Locale("en", "GH")
             if (tts.setLanguage(gh) < 0) tts.language = java.util.Locale.US
-            tts.setSpeechRate(0.88f); tts.setPitch(1.0f); mode = Mode.WAKE
-            if (::recognizer.isInitialized && hasMicPermission()) scheduleListening(900)
+            tts.setSpeechRate(0.88f)
+            tts.setPitch(1.0f)
+        }
+        if (!::recognizer.isInitialized) {
+            if (ttsReady) speak("Voice recognition is not available on this phone.", Mode.IDLE, false)
+            return
+        }
+        if (hasMicPermission()) {
+            mode = Mode.WAKE
+            scheduleListening(if (ttsReady) 300 else 150)
         }
     }
 
@@ -283,7 +370,10 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
         destroyed = true
         handler.removeCallbacksAndMessages(null)
         if (::recognizer.isInitialized) recognizer.destroy()
-        if (::tts.isInitialized) { tts.stop(); tts.shutdown() }
+        if (::tts.isInitialized) {
+            tts.stop()
+            tts.shutdown()
+        }
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
