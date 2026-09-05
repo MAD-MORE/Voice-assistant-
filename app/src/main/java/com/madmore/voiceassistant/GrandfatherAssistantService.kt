@@ -8,6 +8,7 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioAttributes
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -60,6 +61,12 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
         createNotificationChannel()
         promoteToForeground()
         tts = TextToSpeech(this, this)
+        tts.setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                .build()
+        )
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(id: String?) = Unit
             override fun onDone(id: String?) { handler.post { if (!destroyed) finishSpeaking() } }
@@ -97,19 +104,20 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
                 speechShouldListen = false
                 handler.removeCallbacksAndMessages(LISTEN_TOKEN)
                 stopRecognition()
+                if (ttsReady) tts.stop()
                 stopSelf()
                 return START_NOT_STICKY
             }
             ACTION_LISTEN_NOW -> {
                 if (!hasMicPermission()) return START_STICKY
                 mode = Mode.COMMAND
-                if (ttsReady) speak("What should I do for you?", Mode.COMMAND)
-                else scheduleListening(150)
+                speak("What should I do for you?", Mode.COMMAND)
             }
             else -> {
                 if (hasMicPermission()) {
                     mode = Mode.WAKE
-                    scheduleListening(if (ttsReady) 250 else 150)
+                    if (ttsReady) speak("Hello is ready. Say hello when you need me.", Mode.WAKE)
+                    else scheduleListening(250)
                 }
             }
         }
@@ -350,8 +358,7 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
         }
         try {
             startActivity(Intent(Intent.ACTION_CALL, Uri.parse("tel:${candidate.phone.replace("#", "%23")}")).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                )
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             })
             mode = Mode.WAKE
         } catch (_: Exception) {
@@ -364,7 +371,7 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
         if (!ttsReady) {
             mode = resumeMode
             speechShouldListen = listenAfter
-            if (listenAfter) scheduleListening(200)
+            if (listenAfter) scheduleListening(250)
             return
         }
         stopRecognition()
@@ -373,7 +380,10 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
         speechShouldListen = listenAfter
         mode = Mode.SPEAKING
         val result = tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "hello-${System.currentTimeMillis()}")
-        if (result == TextToSpeech.ERROR) finishSpeaking()
+        if (result == TextToSpeech.ERROR) {
+            mode = resumeMode
+            if (listenAfter) scheduleListening(350)
+        }
     }
 
     private fun finishSpeaking() {
@@ -385,16 +395,32 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
         ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 
     override fun onInit(status: Int) {
-        ttsReady = status == TextToSpeech.SUCCESS
-        if (ttsReady) {
-            val gh = java.util.Locale("en", "GH")
-            if (tts.setLanguage(gh) < 0) tts.language = java.util.Locale.US
-            tts.setSpeechRate(0.88f)
-            tts.setPitch(1.0f)
+        ttsReady = false
+        if (status == TextToSpeech.SUCCESS) {
+            val languages = listOf(
+                java.util.Locale("en", "GH"),
+                java.util.Locale.UK,
+                java.util.Locale.US
+            )
+            for (locale in languages) {
+                val availability = tts.isLanguageAvailable(locale)
+                if (availability >= TextToSpeech.LANG_AVAILABLE) {
+                    tts.language = locale
+                    tts.setSpeechRate(0.88f)
+                    tts.setPitch(1.0f)
+                    ttsReady = true
+                    break
+                }
+            }
         }
+
         if (hasMicPermission()) {
             mode = Mode.WAKE
-            scheduleListening(if (ttsReady) 300 else 150)
+            if (ttsReady) {
+                speak("Hello is ready. Say hello when you need me.", Mode.WAKE)
+            } else {
+                scheduleListening(200)
+            }
         }
     }
 
