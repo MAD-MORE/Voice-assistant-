@@ -22,7 +22,7 @@ class CommandParserTest {
     @Test fun naturalCallSentenceIsParsed() {
         val command = parser.parse("Please call Padmore for me")
         assertEquals(CommandType.CALL, command.type)
-        assertEquals("padmore for me", parser.normalize(command.target!!))
+        assertEquals("padmore", parser.normalize(command.target!!))
     }
 
     @Test fun stopIsRecognized() {
