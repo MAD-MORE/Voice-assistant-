@@ -5,6 +5,7 @@ import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -56,7 +57,6 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         setContentView(root)
     }
 
-    // Volume up is a screen-free listen trigger; volume down is an immediate cancel.
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean = when (keyCode) {
         KeyEvent.KEYCODE_VOLUME_UP -> { listenNow(); true }
         KeyEvent.KEYCODE_VOLUME_DOWN -> { if (::speechRecognizer.isInitialized) speechRecognizer.cancel(); waitingForConfirmation = null; speak("Stopped listening."); true }
@@ -68,16 +68,32 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED &&
         ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
 
-    private fun requestRequiredPermissions() = ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.READ_CONTACTS, Manifest.permission.CALL_PHONE), requestCode)
+    private fun requestRequiredPermissions() {
+        val permissions = mutableListOf(
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.READ_CONTACTS,
+            Manifest.permission.CALL_PHONE
+        )
+        if (Build.VERSION.SDK_INT >= 33) permissions += Manifest.permission.POST_NOTIFICATIONS
+        ActivityCompat.requestPermissions(this, permissions.toTypedArray(), requestCode)
+    }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == this.requestCode && hasPermissions()) announceReady() else speak("I need microphone, contacts, and phone permission to help you make calls.")
+        if (requestCode == this.requestCode && hasPermissions()) announceReady()
+        else speak("I need microphone, contacts, and phone permission to help you make calls.")
     }
 
     private fun announceReady() {
-        speak("Hello. I am ready. Tell me who you would like to call.")
-        statusView.postDelayed({ if (!isFinishing) listenNow() }, 3200)
+        try {
+            ContextCompat.startForegroundService(
+                this,
+                Intent(this, GrandfatherAssistantService::class.java).setAction(GrandfatherAssistantService.ACTION_START)
+            )
+        } catch (_: Exception) {
+            // The foreground service will be retried when the app is opened again.
+        }
+        speak("Hello. I am ready. Say hello when you need me.")
     }
 
     private fun listenNow() {
@@ -134,8 +150,8 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         }
         val command = parser.parse(spoken)
         when (command.type) {
-            CommandType.STOP -> { if (::speechRecognizer.isInitialized) speechRecognizer.cancel(); waitingForConfirmation = null; speak("Stopped. I am ready when you need me.") }
-            CommandType.HELP -> speak("You can say call a person's name, say Frɛ me ba for a saved relationship, or say stop.")
+            CommandType.STOP -> { if (::speechRecognizer.isInitialized) speechRecognizer.cancel(); waitingForConfirmation = null; speak("Stopped listening. Say hello when you need me.") }
+            CommandType.HELP -> speak("You can say call a person's name, say Frɛ me ba, or say stop.")
             CommandType.LIST_CONTACTS -> { val names = contacts.allNames(); speak(if (names.isEmpty()) "There are no phone contacts available." else "Your contacts include ${names.joinToString(", ")}.") }
             CommandType.CALL -> resolveAndCall(command.target.orEmpty())
             CommandType.UNKNOWN -> speak("I can make calls. Try saying call Gyamera, or Frɛ me ba.")
