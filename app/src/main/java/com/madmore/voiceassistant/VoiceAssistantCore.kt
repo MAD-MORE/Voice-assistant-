@@ -13,7 +13,13 @@ enum class CommandType { CALL, LIST_CONTACTS, STOP, HELP, UNKNOWN }
 data class VoiceCommand(val type: CommandType, val target: String? = null, val raw: String)
 
 class CommandParser {
-    private val callPrefixes = listOf("call ", "phone ", "ring ", "dial ", "contact ", "frɛ ", "fre ", "frɛ me ", "fre me ")
+    // Match the most specific/longest phrase first so "frɛ me ba" is not
+    // consumed by the shorter "frɛ " prefix, which would leave "me ba".
+    private val callPrefixes = listOf(
+        "frɛ me ", "fre me ",
+        "call ", "phone ", "ring ", "dial ", "contact ",
+        "frɛ ", "fre "
+    )
 
     fun parse(input: String): VoiceCommand {
         val raw = input.trim()
