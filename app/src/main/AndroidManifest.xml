@@ -11,6 +11,9 @@
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>
+        <intent>
+            <action android:name="android.intent.action.ASSIST" />
+        </intent>
     </queries>
 
     <application
@@ -32,5 +35,24 @@
             android:enabled="true"
             android:exported="false"
             android:foregroundServiceType="microphone" />
+
+        <service
+            android:name=".HelloVoiceInteractionService"
+            android:label="Hello Assistant"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION">
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.voice_interaction"
+                android:resource="@xml/voice_interaction_service" />
+        </service>
+
+        <service
+            android:name=".HelloVoiceInteractionSessionService"
+            android:label="Hello Assistant Voice Session"
+            android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION" />
     </application>
 </manifest>
