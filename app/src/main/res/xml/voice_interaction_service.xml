@@ -2,4 +2,4 @@
 <voice-interaction-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:sessionService="com.madmore.voiceassistant.HelloVoiceInteractionSessionService"
     android:supportsAssist="true"
-    android:supportsLaunchFromKeyguard="true" />
+    android:supportsLaunchVoiceAssistFromKeyguard="true" />
