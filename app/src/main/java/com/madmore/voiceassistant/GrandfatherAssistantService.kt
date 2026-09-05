@@ -30,6 +30,7 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
         const val NOTIFICATION_ID = 7001
         const val ACTION_START = "com.madmore.voiceassistant.START_ASSISTANT"
         const val ACTION_STOP = "com.madmore.voiceassistant.STOP_ASSISTANT"
+        const val ACTION_LISTEN_NOW = "com.madmore.voiceassistant.LISTEN_NOW"
         private val LISTEN_TOKEN = Any()
     }
 
@@ -60,20 +61,8 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
         tts = TextToSpeech(this, this)
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) = Unit
-            override fun onDone(utteranceId: String?) {
-                handler.post {
-                    if (destroyed) return@post
-                    mode = speechResumeMode
-                    if (speechShouldListen) scheduleListening(250)
-                }
-            }
-            override fun onError(utteranceId: String?) {
-                handler.post {
-                    if (destroyed) return@post
-                    mode = speechResumeMode
-                    if (speechShouldListen) scheduleListening(250)
-                }
-            }
+            override fun onDone(utteranceId: String?) { handler.post { if (!destroyed) finishSpeaking() } }
+            override fun onError(utteranceId: String?) { handler.post { if (!destroyed) finishSpeaking() } }
         })
         if (SpeechRecognizer.isRecognitionAvailable(this)) {
             recognizer = SpeechRecognizer.createSpeechRecognizer(this)
@@ -88,15 +77,23 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            mode = Mode.IDLE
-            waitingForConfirmation = null
-            stopSelf()
-            return START_NOT_STICKY
-        }
-        if (::recognizer.isInitialized && hasMicPermission()) {
-            mode = Mode.WAKE
-            scheduleListening(300)
+        when (intent?.action) {
+            ACTION_STOP -> {
+                mode = Mode.IDLE
+                waitingForConfirmation = null
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            ACTION_LISTEN_NOW -> {
+                if (::recognizer.isInitialized && hasMicPermission()) speak("What should I do for you?", Mode.COMMAND)
+                else mode = Mode.IDLE
+            }
+            else -> {
+                if (::recognizer.isInitialized && hasMicPermission()) {
+                    mode = Mode.WAKE
+                    scheduleListening(300)
+                }
+            }
         }
         return START_STICKY
     }
@@ -192,17 +189,14 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
         if (remainder.isNotBlank()) {
             mode = Mode.COMMAND
             handleCommand(remainder)
-        } else {
-            speak("What should I do for you?", Mode.COMMAND)
-        }
+        } else speak("What should I do for you?", Mode.COMMAND)
     }
 
     private fun handleCommandResults(phrases: List<String>) {
         if (waitingForConfirmation != null) {
             val answer = phrases.asSequence().map { parser.normalize(it) }.firstOrNull { it == "yes" || it == "y" || it == "no" || it == "n" }
-            if (answer == null) {
-                speak("Please say yes to call, or no to cancel.", Mode.CONFIRMATION)
-            } else {
+            if (answer == null) speak("Please say yes to call, or no to cancel.", Mode.CONFIRMATION)
+            else {
                 val candidate = waitingForConfirmation
                 waitingForConfirmation = null
                 if (answer == "yes" || answer == "y") callContact(candidate)
@@ -233,10 +227,7 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
     }
 
     private fun handleCommand(spoken: String) {
-        if (spoken.isBlank()) {
-            speak("I did not hear you. Please say it again.", Mode.COMMAND)
-            return
-        }
+        if (spoken.isBlank()) { speak("I did not hear you. Please say it again.", Mode.COMMAND); return }
         val normalized = parser.normalize(spoken)
         if (normalized.startsWith("remember ") && normalized.contains(" as ")) {
             val body = normalized.removePrefix("remember ")
@@ -249,18 +240,14 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
             } else speak("I could not find that person in your contacts.", Mode.WAKE)
             return
         }
-        val command = parser.parse(spoken)
-        when (command.type) {
-            CommandType.STOP -> {
-                waitingForConfirmation = null
-                speak("Okay. I am here when you need me.", Mode.WAKE)
-            }
+        when (val command = parser.parse(spoken).type) {
+            CommandType.STOP -> { waitingForConfirmation = null; speak("Okay. I am here when you need me.", Mode.WAKE) }
             CommandType.HELP -> speak("Say hello, then say call a person's name. You can also say stop or remember a name as your son.", Mode.WAKE)
             CommandType.LIST_CONTACTS -> {
                 val names = contacts.allNames()
                 speak(if (names.isEmpty()) "There are no phone contacts available." else "Your contacts include ${names.joinToString(", ")}.", Mode.WAKE)
             }
-            CommandType.CALL -> resolveAndCall(command.target.orEmpty())
+            CommandType.CALL -> resolveAndCall(parser.parse(spoken).target.orEmpty())
             CommandType.UNKNOWN -> speak("I can make calls. Please say call, followed by the person's name.", Mode.COMMAND)
         }
     }
@@ -268,10 +255,7 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
     private fun resolveAndCall(target: String) {
         val query = aliases.resolveAlias(target) ?: target
         val candidates = contacts.findCandidates(query, 5)
-        if (candidates.isEmpty()) {
-            speak("I cannot find $target in your contacts. Please say the name again.", Mode.COMMAND)
-            return
-        }
+        if (candidates.isEmpty()) { speak("I cannot find $target in your contacts. Please say the name again.", Mode.COMMAND); return }
         val top = candidates.first()
         val second = candidates.getOrNull(1)
         val confident = top.score >= 0.86 && (second == null || top.score - second.score >= 0.10)
@@ -295,9 +279,7 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
         try {
             startActivity(Intent(Intent.ACTION_CALL, Uri.parse("tel:${candidate.phone}".replace("#", "%23"))).apply { addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) })
             mode = Mode.WAKE
-        } catch (_: Exception) {
-            speak("I could not start the call. Please try again.", Mode.WAKE)
-        }
+        } catch (_: Exception) { speak("I could not start the call. Please try again.", Mode.WAKE) }
     }
 
     private fun speak(message: String, resumeMode: Mode, listenAfter: Boolean = true) {
@@ -306,6 +288,11 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
         speechShouldListen = listenAfter
         mode = Mode.SPEAKING
         tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "hello-${System.currentTimeMillis()}")
+    }
+
+    private fun finishSpeaking() {
+        mode = speechResumeMode
+        if (speechShouldListen) scheduleListening(250)
     }
 
     private fun hasMicPermission() = ActivityCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
