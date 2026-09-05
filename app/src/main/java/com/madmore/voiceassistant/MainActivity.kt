@@ -2,6 +2,7 @@ package com.madmore.voiceassistant
 
 import android.Manifest
 import android.app.Activity
+import android.app.role.RoleManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -9,7 +10,6 @@ import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
-import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -18,6 +18,7 @@ import androidx.core.content.ContextCompat
 
 class MainActivity : Activity() {
     private val requestCode = 501
+    private val assistantRoleRequest = 502
     private lateinit var status: TextView
     private lateinit var hint: TextView
     private lateinit var listenButton: Button
@@ -44,14 +45,12 @@ class MainActivity : Activity() {
             gravity = Gravity.CENTER
             setTextColor(Color.rgb(55, 61, 80))
         }
-
         val subtitle = TextView(this).apply {
             text = "Your voice assistant"
             textSize = 21f
             gravity = Gravity.CENTER
             setTextColor(Color.rgb(100, 105, 120))
         }
-
         status = TextView(this).apply {
             text = "●  READY"
             textSize = 28f
@@ -61,20 +60,17 @@ class MainActivity : Activity() {
             setTextColor(Color.rgb(38, 145, 105))
             contentDescription = "Assistant status"
         }
-
         hint = TextView(this).apply {
-            text = "Say  “Hello”  or  “Helloooo”\n\nThen say:  “Call Padmore for me”"
+            text = "After setup, you do not need to press Hello.\n\nSay “Hello” and then tell me what you need."
             textSize = 25f
             gravity = Gravity.CENTER
             setTextColor(Color.rgb(55, 61, 80))
             setPadding(18, 22, 18, 22)
         }
-
         listenButton = bigButton("LISTEN NOW") { startAssistant(GrandfatherAssistantService.ACTION_LISTEN_NOW) }
         stopButton = bigButton("PAUSE HELLO") { startAssistant(GrandfatherAssistantService.ACTION_STOP) }
-
         val help = TextView(this).apply {
-            text = "You can speak normally.\nHello can use your real contacts and can ask before calling when a name is unclear."
+            text = "Hello can use your real contacts, understand common pronunciation differences, and ask before making an uncertain call."
             textSize = 19f
             gravity = Gravity.CENTER
             setTextColor(Color.rgb(105, 110, 125))
@@ -121,14 +117,31 @@ class MainActivity : Activity() {
         if (requestCode == this.requestCode && hasRequiredPermissions()) showReady()
         else {
             status.text = "PERMISSIONS NEEDED"
-            hint.text = "Please allow microphone, contacts and phone calls so Hello can help."
+            hint.text = "A helper needs to allow microphone, contacts and phone calls once during setup."
         }
     }
 
     private fun showReady() {
         status.text = "●  HELLO IS READY"
-        hint.text = "Say  “Hello”  or  “Helloooo”\n\nThen say:  “Call Padmore for me”"
+        hint.text = "After setup, Grandpa does not need to press a button.\n\nSay “Hello” and speak naturally."
+        requestAssistantRoleIfAvailable()
         startAssistant(GrandfatherAssistantService.ACTION_START)
+    }
+
+    private fun requestAssistantRoleIfAvailable() {
+        if (Build.VERSION.SDK_INT < 29) return
+        val roleManager = getSystemService(RoleManager::class.java) ?: return
+        if (!roleManager.isRoleAvailable(RoleManager.ROLE_ASSISTANT)) return
+        if (roleManager.isRoleHeld(RoleManager.ROLE_ASSISTANT)) return
+        if (isFinishing || isChangingConfigurations) return
+        startActivityForResult(roleManager.createRequestRoleIntent(RoleManager.ROLE_ASSISTANT), assistantRoleRequest)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == assistantRoleRequest && resultCode == RESULT_OK && hasRequiredPermissions()) {
+            startAssistant(GrandfatherAssistantService.ACTION_START)
+        }
     }
 
     private fun startAssistant(action: String) {
@@ -137,7 +150,7 @@ class MainActivity : Activity() {
             ContextCompat.startForegroundService(this, Intent(this, GrandfatherAssistantService::class.java).setAction(action))
             status.text = if (action == GrandfatherAssistantService.ACTION_STOP) "●  PAUSED" else "●  LISTENING FOR HELLO"
         } catch (_: Exception) {
-            status.text = "OPEN HELLO TO START"
+            status.text = "HELLO NEEDS SETUP"
         }
     }
 
