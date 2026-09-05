@@ -35,7 +35,7 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
 
     private enum class Mode { IDLE, WAKE, COMMAND, CONFIRMATION, SPEAKING }
 
-    private lateinit var recognizer: SpeechRecognizer
+    private var recognizer: SpeechRecognizer? = null
     private lateinit var tts: TextToSpeech
     private lateinit var parser: CommandParser
     private lateinit var contacts: ContactRepository
@@ -50,6 +50,7 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
     private var destroyed = false
     private var lastRecognitionStart = 0L
     private var recognitionFailures = 0
+    private var currentlyListening = false
 
     override fun onCreate() {
         super.onCreate()
@@ -64,17 +65,18 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
             override fun onDone(id: String?) { handler.post { if (!destroyed) finishSpeaking() } }
             override fun onError(id: String?) { handler.post { if (!destroyed) finishSpeaking() } }
         })
+        createRecognizer()
+    }
 
-        // Never make Android 12+ on-device support a hard requirement. OfflineSpeech
-        // prefers on-device recognition but falls back to the platform recognizer on
-        // older/unsupported phones, where EXTRA_PREFER_OFFLINE is still requested.
+    private fun createRecognizer() {
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            recognizer = null
+            return
+        }
         try {
-            OfflineSpeech.create(this)?.also {
-                recognizer = it
-                recognizer.setRecognitionListener(listener)
-            }
+            recognizer = OfflineSpeech.create(this)?.also { it.setRecognitionListener(listener) }
         } catch (_: Exception) {
-            // Recognition is reported through the normal unavailable path below.
+            recognizer = null
         }
     }
 
@@ -90,10 +92,11 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> {
-                mode = Mode.IDLE
                 waitingForConfirmation = null
+                mode = Mode.IDLE
+                speechShouldListen = false
                 handler.removeCallbacksAndMessages(LISTEN_TOKEN)
-                try { if (::recognizer.isInitialized) recognizer.cancel() } catch (_: Exception) { }
+                stopRecognition()
                 stopSelf()
                 return START_NOT_STICKY
             }
@@ -106,7 +109,7 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
             else -> {
                 if (hasMicPermission()) {
                     mode = Mode.WAKE
-                    if (ttsReady) scheduleListening(250)
+                    scheduleListening(if (ttsReady) 250 else 150)
                 }
             }
         }
@@ -116,7 +119,11 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
     private fun buildNotification(): Notification = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.ic_btn_speak_now)
         .setContentTitle("Hello is ready")
-        .setContentText(if (OfflineSpeech.isTrueOnDeviceAvailable(this)) "Offline voice is ready" else "Voice recognition is ready")
+        .setContentText(
+            if (OfflineSpeech.isTrueOnDeviceAvailable(this)) "Offline voice is ready"
+            else if (SpeechRecognizer.isRecognitionAvailable(this)) "Voice recognition is ready"
+            else "Speech recognition unavailable"
+        )
         .setOngoing(true)
         .setCategory(NotificationCompat.CATEGORY_SERVICE)
         .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -135,72 +142,108 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
     private fun scheduleListening(delayMs: Long) {
         handler.removeCallbacksAndMessages(LISTEN_TOKEN)
         handler.postAtTime({
-            if (!destroyed && mode != Mode.SPEAKING && ::recognizer.isInitialized && hasMicPermission()) {
+            if (!destroyed && mode != Mode.SPEAKING && recognizer != null && hasMicPermission()) {
                 startRecognition()
             }
         }, LISTEN_TOKEN, android.os.SystemClock.uptimeMillis() + delayMs)
     }
 
     private fun startRecognition() {
-        if (destroyed || mode == Mode.SPEAKING || !::recognizer.isInitialized || !hasMicPermission()) return
+        val r = recognizer ?: run {
+            createRecognizer()
+            if (recognizer == null) {
+                if (ttsReady) speak("I cannot hear you because speech recognition is not available on this phone.", Mode.IDLE, false)
+                return
+            }
+            recognizer!!
+        }
+        if (destroyed || mode == Mode.SPEAKING || !hasMicPermission()) return
         val now = android.os.SystemClock.elapsedRealtime()
-        if (now - lastRecognitionStart < 900) return
+        if (currentlyListening) return
+        if (now - lastRecognitionStart < 500) {
+            scheduleListening(550)
+            return
+        }
         lastRecognitionStart = now
+        currentlyListening = true
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-GH")
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "en-GH")
+            OfflineSpeech.configureOfflineFirst(this)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 8)
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
             putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1200)
-            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 700)
+            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 500)
         }
         try {
-            recognizer.startListening(intent)
+            r.startListening(intent)
         } catch (_: Exception) {
+            currentlyListening = false
             recognitionFailures++
-            scheduleListening(minOf(6000L, 700L * recognitionFailures))
+            recreateRecognizerAfterFailure()
+            scheduleListening(minOf(4000L, 500L * recognitionFailures))
         }
     }
 
     private val listener = object : RecognitionListener {
         override fun onReadyForSpeech(params: Bundle?) {
+            currentlyListening = true
             recognitionFailures = 0
         }
         override fun onBeginningOfSpeech() = Unit
         override fun onRmsChanged(rmsdB: Float) = Unit
         override fun onBufferReceived(buffer: ByteArray?) = Unit
-        override fun onEndOfSpeech() = Unit
+        override fun onEndOfSpeech() { currentlyListening = false }
         override fun onPartialResults(partialResults: Bundle?) = Unit
         override fun onEvent(eventType: Int, params: Bundle?) = Unit
 
         override fun onError(error: Int) {
+            currentlyListening = false
             if (destroyed || mode == Mode.SPEAKING) return
             recognitionFailures++
             val delay = when (error) {
-                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> 2200L
-                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> 650L
-                SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> 3500L
-                SpeechRecognizer.ERROR_CLIENT -> 1200L
-                else -> minOf(6000L, 700L * recognitionFailures)
+                SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> 1800L
+                SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> 500L
+                SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> 1800L
+                SpeechRecognizer.ERROR_CLIENT -> 800L
+                else -> minOf(5000L, 600L * recognitionFailures)
+            }
+            if (error == SpeechRecognizer.ERROR_CLIENT || error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
+                recreateRecognizerAfterFailure()
             }
             scheduleListening(delay)
         }
 
         override fun onResults(results: Bundle) {
+            currentlyListening = false
             if (destroyed || mode == Mode.SPEAKING) return
             recognitionFailures = 0
             val phrases = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty()
+            if (phrases.isEmpty()) {
+                scheduleListening(350)
+                return
+            }
             if (mode == Mode.WAKE || mode == Mode.IDLE) handleWakeResults(phrases) else handleCommandResults(phrases)
         }
+    }
+
+    private fun recreateRecognizerAfterFailure() {
+        if (destroyed) return
+        try { recognizer?.cancel() } catch (_: Exception) { }
+        try { recognizer?.destroy() } catch (_: Exception) { }
+        recognizer = null
+        createRecognizer()
+    }
+
+    private fun stopRecognition() {
+        currentlyListening = false
+        try { recognizer?.cancel() } catch (_: Exception) { }
     }
 
     private fun handleWakeResults(phrases: List<String>) {
         val match = wakeDetector.detect(phrases)
         if (!match.matched) {
             mode = Mode.WAKE
-            scheduleListening(650)
+            scheduleListening(450)
             return
         }
         val remainder = wakeDetector.removeWakeWord(match.text)
@@ -256,9 +299,7 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
             if (c != null && c.score >= 0.45) {
                 aliases.saveAlias(relationship, c.name)
                 speak("Okay. I will remember ${c.name} as $relationship.", Mode.WAKE)
-            } else {
-                speak("I could not find that person in your contacts.", Mode.WAKE)
-            }
+            } else speak("I could not find that person in your contacts.", Mode.WAKE)
             return
         }
         when (command.type) {
@@ -309,7 +350,8 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
         }
         try {
             startActivity(Intent(Intent.ACTION_CALL, Uri.parse("tel:${candidate.phone.replace("#", "%23")}")).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                )
             })
             mode = Mode.WAKE
         } catch (_: Exception) {
@@ -320,27 +362,23 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
     private fun speak(message: String, resumeMode: Mode, listenAfter: Boolean = true) {
         if (destroyed) return
         if (!ttsReady) {
-            // TTS initialization is asynchronous. Do not lose the interaction;
-            // keep listening so the first command can still be captured.
             mode = resumeMode
-            if (listenAfter) scheduleListening(250)
+            speechShouldListen = listenAfter
+            if (listenAfter) scheduleListening(200)
             return
         }
-        try { if (::recognizer.isInitialized) recognizer.cancel() } catch (_: Exception) { }
+        stopRecognition()
         handler.removeCallbacksAndMessages(LISTEN_TOKEN)
         speechResumeMode = resumeMode
         speechShouldListen = listenAfter
         mode = Mode.SPEAKING
         val result = tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "hello-${System.currentTimeMillis()}")
-        if (result == TextToSpeech.ERROR) {
-            mode = resumeMode
-            if (listenAfter) scheduleListening(300)
-        }
+        if (result == TextToSpeech.ERROR) finishSpeaking()
     }
 
     private fun finishSpeaking() {
         mode = speechResumeMode
-        if (speechShouldListen) scheduleListening(700)
+        if (speechShouldListen) scheduleListening(550)
     }
 
     private fun hasMicPermission() =
@@ -354,10 +392,6 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
             tts.setSpeechRate(0.88f)
             tts.setPitch(1.0f)
         }
-        if (!::recognizer.isInitialized) {
-            if (ttsReady) speak("Voice recognition is not available on this phone.", Mode.IDLE, false)
-            return
-        }
         if (hasMicPermission()) {
             mode = Mode.WAKE
             scheduleListening(if (ttsReady) 300 else 150)
@@ -369,7 +403,9 @@ class GrandfatherAssistantService : Service(), TextToSpeech.OnInitListener {
     override fun onDestroy() {
         destroyed = true
         handler.removeCallbacksAndMessages(null)
-        if (::recognizer.isInitialized) recognizer.destroy()
+        stopRecognition()
+        try { recognizer?.destroy() } catch (_: Exception) { }
+        recognizer = null
         if (::tts.isInitialized) {
             tts.stop()
             tts.shutdown()
