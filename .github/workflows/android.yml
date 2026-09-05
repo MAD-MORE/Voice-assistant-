@@ -24,3 +24,9 @@ jobs:
         run: gradle testDebugUnitTest
       - name: Debug APK
         run: gradle assembleDebug
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: voice-assistant-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
