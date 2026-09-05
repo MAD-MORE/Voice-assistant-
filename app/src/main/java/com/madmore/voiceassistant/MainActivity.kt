@@ -4,69 +4,107 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
+import android.graphics.Color
+import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
 import android.view.Gravity
-import android.view.KeyEvent
+import android.view.View
 import android.widget.Button
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import java.util.Locale
 
-class MainActivity : Activity(), TextToSpeech.OnInitListener {
-    private lateinit var speechRecognizer: SpeechRecognizer
-    private lateinit var tts: TextToSpeech
-    private lateinit var parser: CommandParser
-    private lateinit var contacts: ContactRepository
-    private lateinit var aliases: AliasStore
-    private lateinit var statusView: TextView
-    private lateinit var transcriptView: TextView
-    private var ttsReady = false
-    private var waitingForConfirmation: ContactCandidate? = null
+class MainActivity : Activity() {
     private val requestCode = 501
+    private lateinit var status: TextView
+    private lateinit var hint: TextView
+    private lateinit var listenButton: Button
+    private lateinit var stopButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        parser = CommandParser(); contacts = ContactRepository(this); aliases = AliasStore(this)
-        buildAccessibilityFirstUi()
-        tts = TextToSpeech(this, this)
-        if (SpeechRecognizer.isRecognitionAvailable(this)) {
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this)
-            speechRecognizer.setRecognitionListener(listener)
-        }
-        if (!hasPermissions()) requestRequiredPermissions() else announceReady()
+        buildUi()
+        if (!hasRequiredPermissions()) requestRequiredPermissions() else showReady()
     }
 
-    private fun buildAccessibilityFirstUi() {
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(32, 40, 32, 32); gravity = Gravity.CENTER_HORIZONTAL }
-        statusView = TextView(this).apply { text = "READY TO LISTEN"; textSize = 28f; gravity = Gravity.CENTER; contentDescription = "Assistant status" }
-        transcriptView = TextView(this).apply { text = "Say: Call Gyamera\nOr: Frɛ me ba"; textSize = 24f; setPadding(0, 28, 0, 28) }
-        val listen = Button(this).apply { text = "LISTEN"; textSize = 30f; minHeight = 150; contentDescription = "Start voice listening"; setOnClickListener { listenNow() } }
-        val repeat = Button(this).apply { text = "REPEAT"; textSize = 24f; minHeight = 100; setOnClickListener { speak("Say call followed by the person's name, or say Frɛ me ba to call your saved child.") } }
-        val scroll = ScrollView(this).apply { addView(transcriptView) }
-        root.addView(statusView, LinearLayout.LayoutParams(-1, 100)); root.addView(scroll, LinearLayout.LayoutParams(-1, 0, 1f)); root.addView(listen, LinearLayout.LayoutParams(-1, 160)); root.addView(repeat, LinearLayout.LayoutParams(-1, 110))
+    private fun buildUi() {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(28, 34, 28, 28)
+            setBackgroundColor(Color.rgb(248, 249, 253))
+        }
+
+        val title = TextView(this).apply {
+            text = "HELLO"
+            textSize = 38f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(55, 61, 80))
+        }
+
+        val subtitle = TextView(this).apply {
+            text = "Your voice assistant"
+            textSize = 21f
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(100, 105, 120))
+        }
+
+        status = TextView(this).apply {
+            text = "●  READY"
+            textSize = 28f
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(0, 38, 0, 18)
+            setTextColor(Color.rgb(38, 145, 105))
+            contentDescription = "Assistant status"
+        }
+
+        hint = TextView(this).apply {
+            text = "Say  “Hello”  or  “Helloooo”\n\nThen say:  “Call Padmore for me”"
+            textSize = 25f
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(55, 61, 80))
+            setPadding(18, 22, 18, 22)
+        }
+
+        listenButton = bigButton("LISTEN NOW") { startAssistant(GrandfatherAssistantService.ACTION_LISTEN_NOW) }
+        stopButton = bigButton("PAUSE HELLO") { startAssistant(GrandfatherAssistantService.ACTION_STOP) }
+
+        val help = TextView(this).apply {
+            text = "You can speak normally.\nHello can use your real contacts and can ask before calling when a name is unclear."
+            textSize = 19f
+            gravity = Gravity.CENTER
+            setTextColor(Color.rgb(105, 110, 125))
+            setPadding(20, 25, 20, 0)
+        }
+
+        root.addView(title, LinearLayout.LayoutParams(-1, 70))
+        root.addView(subtitle, LinearLayout.LayoutParams(-1, 50))
+        root.addView(status, LinearLayout.LayoutParams(-1, 105))
+        root.addView(hint, LinearLayout.LayoutParams(-1, 0, 1f))
+        root.addView(listenButton, LinearLayout.LayoutParams(-1, 145))
+        root.addView(stopButton, LinearLayout.LayoutParams(-1, 115))
+        root.addView(help, LinearLayout.LayoutParams(-1, 115))
         setContentView(root)
     }
 
-    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean = when (keyCode) {
-        KeyEvent.KEYCODE_VOLUME_UP -> { listenNow(); true }
-        KeyEvent.KEYCODE_VOLUME_DOWN -> { if (::speechRecognizer.isInitialized) speechRecognizer.cancel(); waitingForConfirmation = null; speak("Stopped listening."); true }
-        else -> super.onKeyDown(keyCode, event)
+    private fun bigButton(label: String, action: () -> Unit): Button = Button(this).apply {
+        text = label
+        textSize = 27f
+        typeface = Typeface.DEFAULT_BOLD
+        isAllCaps = false
+        minHeight = 100
+        setOnClickListener { action() }
+        contentDescription = label
     }
 
-    private fun hasPermissions(): Boolean =
+    private fun hasRequiredPermissions(): Boolean =
         ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED &&
-        ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED &&
-        ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
 
     private fun requestRequiredPermissions() {
         val permissions = mutableListOf(
@@ -80,119 +118,31 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == this.requestCode && hasPermissions()) announceReady()
-        else speak("I need microphone, contacts, and phone permission to help you make calls.")
+        if (requestCode == this.requestCode && hasRequiredPermissions()) showReady()
+        else {
+            status.text = "PERMISSIONS NEEDED"
+            hint.text = "Please allow microphone, contacts and phone calls so Hello can help."
+        }
     }
 
-    private fun announceReady() {
+    private fun showReady() {
+        status.text = "●  HELLO IS READY"
+        hint.text = "Say  “Hello”  or  “Helloooo”\n\nThen say:  “Call Padmore for me”"
+        startAssistant(GrandfatherAssistantService.ACTION_START)
+    }
+
+    private fun startAssistant(action: String) {
+        if (!hasRequiredPermissions()) { requestRequiredPermissions(); return }
         try {
-            ContextCompat.startForegroundService(
-                this,
-                Intent(this, GrandfatherAssistantService::class.java).setAction(GrandfatherAssistantService.ACTION_START)
-            )
+            ContextCompat.startForegroundService(this, Intent(this, GrandfatherAssistantService::class.java).setAction(action))
+            status.text = if (action == GrandfatherAssistantService.ACTION_STOP) "●  PAUSED" else "●  LISTENING FOR HELLO"
         } catch (_: Exception) {
-            // The foreground service will be retried when the app is opened again.
-        }
-        speak("Hello. I am ready. Say hello when you need me.")
-    }
-
-    private fun listenNow() {
-        if (waitingForConfirmation != null) { speak("Please say yes to call ${waitingForConfirmation!!.name}, or say no to cancel."); return }
-        if (!::speechRecognizer.isInitialized) { speak("Voice recognition is not available on this phone."); return }
-        if (!hasPermissions()) { requestRequiredPermissions(); return }
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-GH")
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "en-GH")
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5)
-        }
-        statusView.text = "LISTENING…"; transcriptView.text = "Listening for English or Akan/Twi…"; speechRecognizer.startListening(intent)
-    }
-
-    private val listener = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) { statusView.text = "SPEAK NOW" }
-        override fun onBeginningOfSpeech() { statusView.text = "HEARING YOU" }
-        override fun onRmsChanged(rmsdB: Float) = Unit
-        override fun onBufferReceived(buffer: ByteArray?) = Unit
-        override fun onEndOfSpeech() { statusView.text = "THINKING…" }
-        override fun onError(error: Int) {
-            statusView.text = "READY TO LISTEN"
-            speak(when (error) {
-                SpeechRecognizer.ERROR_NO_MATCH -> "I did not understand. Please say it again."
-                SpeechRecognizer.ERROR_NETWORK, SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "The voice service is unavailable right now. Please try again."
-                else -> "Please try again."
-            })
-        }
-        override fun onResults(results: Bundle) {
-            statusView.text = "READY TO LISTEN"
-            val spoken = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty()
-            transcriptView.text = "You said: $spoken"; handleSpeech(spoken)
-        }
-        override fun onPartialResults(partialResults: Bundle?) = Unit
-        override fun onEvent(eventType: Int, params: Bundle?) = Unit
-    }
-
-    private fun handleSpeech(spoken: String) {
-        if (spoken.isBlank()) return
-        if (waitingForConfirmation != null) {
-            val answer = parser.normalize(spoken); val candidate = waitingForConfirmation; waitingForConfirmation = null
-            if (answer == "yes" || answer == "y") callContact(candidate) else speak("Okay, I will not call.")
-            return
-        }
-        val normalized = parser.normalize(spoken)
-        if (normalized.startsWith("remember ") && normalized.contains(" as ")) {
-            val body = normalized.removePrefix("remember "); val person = body.substringBefore(" as ").trim(); val relationship = body.substringAfter(" as ").trim()
-            val candidate = contacts.findCandidates(person, 1).firstOrNull()
-            if (candidate != null && candidate.score >= 0.45) { aliases.saveAlias(relationship, candidate.name); speak("Okay. I will remember ${candidate.name} as $relationship.") }
-            else speak("I could not find that person in your contacts.")
-            return
-        }
-        val command = parser.parse(spoken)
-        when (command.type) {
-            CommandType.STOP -> { if (::speechRecognizer.isInitialized) speechRecognizer.cancel(); waitingForConfirmation = null; speak("Stopped listening. Say hello when you need me.") }
-            CommandType.HELP -> speak("You can say call a person's name, say Frɛ me ba, or say stop.")
-            CommandType.LIST_CONTACTS -> { val names = contacts.allNames(); speak(if (names.isEmpty()) "There are no phone contacts available." else "Your contacts include ${names.joinToString(", ")}.") }
-            CommandType.CALL -> resolveAndCall(command.target.orEmpty())
-            CommandType.UNKNOWN -> speak("I can make calls. Try saying call Gyamera, or Frɛ me ba.")
+            status.text = "OPEN HELLO TO START"
         }
     }
 
-    private fun resolveAndCall(target: String) {
-        val query = aliases.resolveAlias(target) ?: target
-        val candidates = contacts.findCandidates(query, 5)
-        if (candidates.isEmpty()) { speak("I cannot find $target in your contacts. Say another name."); return }
-        val top = candidates.first()
-        if (top.score >= 0.82 && (candidates.size == 1 || top.score - candidates[1].score >= 0.12)) { speak("Calling ${top.name}."); callContact(top) }
-        else { waitingForConfirmation = top; val alternatives = candidates.take(3).joinToString(", ") { it.name }; speak("I heard $target. Did you mean ${top.name}? Other matches are $alternatives. Say yes or no.") }
-    }
-
-    private fun callContact(candidate: ContactCandidate?) {
-        if (candidate == null) return
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) { speak("Phone permission is not available."); requestRequiredPermissions(); return }
-        try { startActivity(Intent(Intent.ACTION_CALL, Uri.parse("tel:${candidate.phone}"))) }
-        catch (_: Exception) { Toast.makeText(this, "Unable to start the call", Toast.LENGTH_LONG).show(); speak("I could not start the call. Please try again.") }
-    }
-
-    private fun speak(message: String) {
-        if (!::tts.isInitialized || !ttsReady) return
-        statusView.post { statusView.text = "SPEAKING…" }
-        tts.speak(message, TextToSpeech.QUEUE_FLUSH, null, "assistant-${System.currentTimeMillis()}")
-        statusView.postDelayed({ statusView.text = "READY TO LISTEN" }, 2500)
-    }
-
-    override fun onInit(status: Int) {
-        ttsReady = status == TextToSpeech.SUCCESS
-        if (ttsReady) {
-            val gh = Locale("en", "GH"); val result = tts.setLanguage(gh)
-            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) tts.language = Locale.US
-            tts.setSpeechRate(0.9f); tts.setPitch(1.0f)
-        }
-    }
-
-    override fun onDestroy() {
-        if (::speechRecognizer.isInitialized) speechRecognizer.destroy()
-        if (::tts.isInitialized) { tts.stop(); tts.shutdown() }
-        super.onDestroy()
+    override fun onResume() {
+        super.onResume()
+        if (::status.isInitialized && hasRequiredPermissions()) status.text = "●  HELLO IS READY"
     }
 }
